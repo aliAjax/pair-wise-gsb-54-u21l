@@ -3,20 +3,24 @@ import json
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .domain import Actor, DomainError, PermissionDenied, ValidationError
+from .service import SimulatedCrash
 
 
 RECORD_RE = re.compile(r"^/api/records/(\d+)$")
 ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
+CHAIN_RE = re.compile(r"^/api/records/(\d+)/chain$")
+RESUME_RE = re.compile(r"^/api/records/(\d+)/resume$")
+REVIEW_RE = re.compile(r"^/api/reviews/(\d+)/(accept|reject)$")
 
 
 def make_handler(service: Any, static_dir: Path):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "subsea-cable-repair/1.0"
+        server_version = "subsea-cable-repair/2.0"
 
         def log_message(self, fmt: str, *args: Any) -> None:
             return
@@ -28,7 +32,7 @@ def make_handler(service: Any, static_dir: Path):
                 raise PermissionDenied("缺少X-User-Id或X-Role")
             return Actor(user_id=user_id, role=role, organization=self.headers.get("X-Org", ""))
 
-        def _body(self) -> Dict[str, Any]:
+        def _body(self) -> dict:
             try:
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError as exc:
@@ -58,6 +62,8 @@ def make_handler(service: Any, static_dir: Path):
         def _handle_error(self, exc: Exception) -> None:
             if isinstance(exc, DomainError):
                 self._send(exc.status, {"error": exc.code, "message": str(exc)})
+            elif isinstance(exc, SimulatedCrash):
+                self._send(503, {"error": "interrupted", "message": str(exc)})
             else:
                 self._send(500, {"error": "internal_error", "message": "服务内部错误"})
 
@@ -70,6 +76,14 @@ def make_handler(service: Any, static_dir: Path):
                 if parsed.path == "/":
                     page = (static_dir / "index.html").read_bytes()
                     self._send(200, page, "text/html; charset=utf-8")
+                    return
+                if parsed.path == "/api/environment":
+                    self._send(200, service.environment(self._actor()))
+                    return
+                if parsed.path == "/api/reviews":
+                    query = parse_qs(parsed.query)
+                    status = query.get("status", ["pending"])[0]
+                    self._send(200, {"items": service.list_reviews(self._actor(), status)})
                     return
                 if parsed.path == "/api/records":
                     query = parse_qs(parsed.query)
@@ -84,6 +98,10 @@ def make_handler(service: Any, static_dir: Path):
                 if match:
                     self._send(200, {"items": service.timeline(self._actor(), int(match.group(1)))})
                     return
+                match = CHAIN_RE.match(parsed.path)
+                if match:
+                    self._send(200, service.chain(self._actor(), int(match.group(1))))
+                    return
                 if parsed.path == "/api/stats":
                     self._send(200, service.stats(self._actor()))
                     return
@@ -95,17 +113,43 @@ def make_handler(service: Any, static_dir: Path):
             try:
                 parsed = urlparse(self.path)
                 body = self._body()
+                if parsed.path == "/api/environment":
+                    self._send(200, service.update_environment(self._actor(), body.get("data", body)))
+                    return
                 if parsed.path == "/api/records":
-                    record = service.create(self._actor(), body.get("reference", ""), body.get("data", {}))
-                    self._send(201, record)
+                    result = service.create(self._actor(), body.get("reference", ""), body.get("data", {}))
+                    self._send(202 if result["status"] == "parked_for_review" else 201, result)
+                    return
+                match = RESUME_RE.match(parsed.path)
+                if match:
+                    idem_key = body.get("idem_key")
+                    if idem_key is not None and not isinstance(idem_key, str):
+                        raise ValidationError("idem_key必须是字符串")
+                    self._send(200, service.resume(self._actor(), int(match.group(1)), idem_key))
+                    return
+                match = REVIEW_RE.match(parsed.path)
+                if match:
+                    note = body.get("note", "")
+                    if not isinstance(note, str):
+                        raise ValidationError("note必须是字符串")
+                    review = service.resolve_review(
+                        self._actor(), int(match.group(1)), match.group(2) == "accept", note,
+                    )
+                    self._send(200, review)
                     return
                 match = ACTION_RE.match(parsed.path)
                 if match:
                     version = body.get("expected_version")
-                    if not isinstance(version, int):
+                    if not isinstance(version, int) or isinstance(version, bool):
                         raise ValidationError("expected_version必须是整数")
-                    record = service.act(self._actor(), int(match.group(1)), version, match.group(2), body.get("data", {}))
-                    self._send(200, record)
+                    idem_key = body.get("idem_key")
+                    if idem_key is not None and not isinstance(idem_key, str):
+                        raise ValidationError("idem_key必须是字符串")
+                    result = service.execute(
+                        self._actor(), int(match.group(1)), version,
+                        match.group(2), body.get("data", {}), idem_key,
+                    )
+                    self._send(200, result)
                     return
                 self._send(404, {"error": "not_found", "message": "路径不存在"})
             except Exception as exc:

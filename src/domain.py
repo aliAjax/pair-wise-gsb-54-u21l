@@ -23,6 +23,18 @@ class Conflict(DomainError):
     code = "conflict"
 
 
+class PlanInvalidated(Conflict):
+    """方案依据（海况/备缆）已变化，未执行方案必须先重算。"""
+
+    code = "plan_invalidated"
+
+
+class RecoveryRequired(Conflict):
+    """存在中断在半路的处置，必须先按同一幂等键恢复续做。"""
+
+    code = "recovery_required"
+
+
 class PermissionDenied(DomainError):
     status = 403
     code = "permission_denied"
