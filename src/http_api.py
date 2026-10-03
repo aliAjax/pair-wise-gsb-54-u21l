@@ -12,6 +12,8 @@ from .domain import Actor, DomainError, PermissionDenied, ValidationError
 RECORD_RE = re.compile(r"^/api/records/(\d+)$")
 ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
+REVISIONS_RE = re.compile(r"^/api/records/(\d+)/revisions$")
+REVIEW_RE = re.compile(r"^/api/records/(\d+)/revisions/(\d+)/review$")
 
 
 def make_handler(service: Any, static_dir: Path):
@@ -76,6 +78,12 @@ def make_handler(service: Any, static_dir: Path):
                     records = service.list_records(self._actor(), state=query.get("state", [None])[0], limit=int(query.get("limit", ["100"])[0]))
                     self._send(200, {"items": records})
                     return
+                if parsed.path == "/api/environment":
+                    self._send(200, service.environment(self._actor()))
+                    return
+                if parsed.path == "/api/inventory":
+                    self._send(200, service.inventory(self._actor()))
+                    return
                 match = RECORD_RE.match(parsed.path)
                 if match:
                     self._send(200, service.get_record(self._actor(), int(match.group(1))))
@@ -83,6 +91,10 @@ def make_handler(service: Any, static_dir: Path):
                 match = AUDIT_RE.match(parsed.path)
                 if match:
                     self._send(200, {"items": service.timeline(self._actor(), int(match.group(1)))})
+                    return
+                match = REVISIONS_RE.match(parsed.path)
+                if match:
+                    self._send(200, {"items": service.list_revisions(self._actor(), int(match.group(1)))})
                     return
                 if parsed.path == "/api/stats":
                     self._send(200, service.stats(self._actor()))
@@ -96,16 +108,45 @@ def make_handler(service: Any, static_dir: Path):
                 parsed = urlparse(self.path)
                 body = self._body()
                 if parsed.path == "/api/records":
-                    record = service.create(self._actor(), body.get("reference", ""), body.get("data", {}))
-                    self._send(201, record)
+                    result = service.create(self._actor(), body.get("reference", ""), body.get("data", {}))
+                    if isinstance(result, dict) and result.get("status") == "pending_review":
+                        self._send(202, result)
+                    else:
+                        self._send(201, result)
+                    return
+                if parsed.path == "/api/environment":
+                    result = service.update_environment(
+                        self._actor(),
+                        sea_state=body.get("sea_state"),
+                        spare_total_km=body.get("spare_total_km"),
+                        reason=body.get("reason", ""),
+                    )
+                    self._send(200, result)
+                    return
+                if parsed.path == "/api/recover":
+                    self._send(200, service.recover(self._actor()))
                     return
                 match = ACTION_RE.match(parsed.path)
                 if match:
                     version = body.get("expected_version")
                     if not isinstance(version, int):
                         raise ValidationError("expected_version必须是整数")
-                    record = service.act(self._actor(), int(match.group(1)), version, match.group(2), body.get("data", {}))
+                    action_id = body.get("action_id")
+                    if action_id is not None and not isinstance(action_id, str):
+                        raise ValidationError("action_id必须是文本")
+                    record = service.act(self._actor(), int(match.group(1)), version, match.group(2), body.get("data", {}), action_id=action_id)
                     self._send(200, record)
+                    return
+                match = REVIEW_RE.match(parsed.path)
+                if match:
+                    result = service.review_revision(
+                        self._actor(),
+                        int(match.group(1)),
+                        int(match.group(2)),
+                        body.get("decision", ""),
+                        body.get("note", ""),
+                    )
+                    self._send(200, result)
                     return
                 self._send(404, {"error": "not_found", "message": "路径不存在"})
             except Exception as exc:

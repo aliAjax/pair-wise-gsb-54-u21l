@@ -21,9 +21,14 @@ class FailureTest(unittest.TestCase):
     def test_permission_and_duplicate(self):
         with self.assertRaises(PermissionDenied):
             self.service.create(Actor("outsider", "outsider"), "CABLE-30001", CREATE_DATA)
-        self.service.create(Actor("creator", "noc_operator"), "CABLE-30001", CREATE_DATA)
-        with self.assertRaises(Conflict):
-            self.service.create(Actor("creator", "noc_operator"), "CABLE-30001", CREATE_DATA)
+        record = self.service.create(Actor("creator", "noc_operator"), "CABLE-30001", CREATE_DATA)
+        # 同一故障记录的后到提交只留待复核，不能盖掉已生效状态
+        later = self.service.create(Actor("creator2", "noc_operator"), "CABLE-30001", CREATE_DATA)
+        self.assertEqual(later["status"], "pending_review")
+        self.assertEqual(later["record_id"], record["id"])
+        unchanged = self.service.get_record(Actor("creator", "noc_operator"), record["id"])
+        self.assertEqual(unchanged["version"], record["version"])
+        self.assertEqual(unchanged["state"], "detected")
 
     def test_stale_version_is_rejected(self):
         record = self.service.create(Actor("creator", "noc_operator"), "CABLE-30001", CREATE_DATA)

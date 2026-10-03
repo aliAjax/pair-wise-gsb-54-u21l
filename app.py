@@ -3,6 +3,7 @@ import argparse
 from pathlib import Path
 
 from src.audit import AuditRecorder
+from src.domain import Actor
 from src.http_api import create_server
 from src.repository import Repository
 from src.rules import DomainRules
@@ -17,7 +18,10 @@ DEFAULT_PORT = 8330
 def build_service(db_path: str) -> Service:
     repository = Repository(db_path)
     audit = AuditRecorder(repository)
-    return Service(repository, DomainRules(), audit)
+    service = Service(repository, DomainRules(), audit)
+    # 启动即对账：上次中断的未完成动作在此归位，系统回到上次完整处置
+    service.recover(Actor("system", "admin"))
+    return service
 
 
 def parse_args():
